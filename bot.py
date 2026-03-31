@@ -1,4 +1,3 @@
-import os
 import re
 import asyncio
 import logging
@@ -7,16 +6,29 @@ from pathlib import Path
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import yt_dlp
+from yandex_music import ClientAsync
 
 BOT_TOKEN = "8786211639:AAH9i6yTvG4WJcDGAMB9DkNxeO2VpCHQytU"
-YANDEX_MUSIC_PATTERN = re.compile(r"https?://music\.yandex\.(ru|com)/album/\d+/track/\d+")
+# Get your token: https://github.com/MarshalX/yandex-music-api/discussions/513
+YANDEX_TOKEN = ""
+
+TRACK_URL_RE = re.compile(r"music\.yandex\.(ru|com)/album/(\d+)/track/(\d+)")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+ym_client: ClientAsync | None = None
+
+
+async def get_client() -> ClientAsync:
+    global ym_client
+    if ym_client is None:
+        ym_client = ClientAsync(YANDEX_TOKEN)
+        await ym_client.init()
+    return ym_client
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -29,58 +41,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def download_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
 
-    # Extract URL from message (handles extra query params)
-    match = YANDEX_MUSIC_PATTERN.search(text)
+    match = TRACK_URL_RE.search(text)
     if not match:
         await update.message.reply_text("Please send a valid Yandex Music track link.")
         return
 
-    url = match.group(0)
-    # Append original full URL to preserve track ID context
-    full_url = text.split()[0]  # use full URL including query params
+    album_id = match.group(2)
+    track_id = match.group(3)
 
     status_msg = await update.message.reply_text("Downloading...")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-        }
+    try:
+        client = await get_client()
 
-        try:
-            loop = asyncio.get_event_loop()
+        tracks = await client.tracks([f"{track_id}:{album_id}"])
+        if not tracks:
+            await status_msg.edit_text("Track not found.")
+            return
 
-            def do_download():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(full_url, download=True)
-                    return info
+        track = tracks[0]
 
-            info = await loop.run_in_executor(None, do_download)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filename = Path(tmpdir) / f"{track_id}.mp3"
 
-            # Find the downloaded audio file
-            all_files = list(Path(tmpdir).iterdir())
+            await track.download_async(str(filename))
 
-            if not all_files:
-                await status_msg.edit_text("Download failed: no output file found.")
-                return
-
-            audio_path = all_files[0]
-            file_size = audio_path.stat().st_size
-
-            # Telegram bot API limit: 50 MB
+            file_size = filename.stat().st_size
             if file_size > 50 * 1024 * 1024:
                 await status_msg.edit_text("File is too large to send via Telegram (> 50 MB).")
                 return
 
-            title = info.get("title", audio_path.stem)
-            artist = info.get("artist") or info.get("uploader", "")
-            duration = info.get("duration")
+            title = track.title or "Unknown"
+            artist = ", ".join(a.name for a in (track.artists or []))
+            duration = int(track.duration_ms / 1000) if track.duration_ms else None
 
             await status_msg.edit_text("Uploading...")
 
-            with open(audio_path, "rb") as audio_file:
+            with open(filename, "rb") as audio_file:
                 await update.message.reply_audio(
                     audio=audio_file,
                     title=title,
@@ -88,22 +85,22 @@ async def download_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     duration=duration,
                 )
 
-            await status_msg.delete()
+        await status_msg.delete()
 
-        except yt_dlp.utils.DownloadError as e:
-            logger.error("yt-dlp error: %s", e)
-            await status_msg.edit_text(
-                f"Failed to download track.\n\nReason: {e}\n\n"
-                "Make sure the track is publicly available."
-            )
-        except Exception as e:
-            logger.exception("Unexpected error")
-            await status_msg.edit_text(f"An unexpected error occurred: {e}")
+    except Exception as e:
+        logger.exception("Error downloading track %s:%s", track_id, album_id)
+        await status_msg.edit_text(f"Failed to download track: {e}")
 
 
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
+    if not YANDEX_TOKEN:
+        raise RuntimeError(
+            "YANDEX_TOKEN is not set. "
+            "Get your token from https://github.com/MarshalX/yandex-music-api/discussions/513 "
+            "and set it in bot.py"
+        )
 
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_track))

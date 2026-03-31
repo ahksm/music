@@ -45,13 +45,6 @@ async def download_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "320",
-                }
-            ],
             "quiet": True,
             "no_warnings": True,
         }
@@ -66,17 +59,14 @@ async def download_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             info = await loop.run_in_executor(None, do_download)
 
-            # Find the downloaded mp3
-            mp3_files = list(Path(tmpdir).glob("*.mp3"))
-            if not mp3_files:
-                # Fallback: any audio file
-                mp3_files = list(Path(tmpdir).iterdir())
+            # Find the downloaded audio file
+            all_files = list(Path(tmpdir).iterdir())
 
-            if not mp3_files:
+            if not all_files:
                 await status_msg.edit_text("Download failed: no output file found.")
                 return
 
-            audio_path = mp3_files[0]
+            audio_path = all_files[0]
             file_size = audio_path.stat().st_size
 
             # Telegram bot API limit: 50 MB

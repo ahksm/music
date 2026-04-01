@@ -79,11 +79,15 @@ def get_audio_url(track_id: str, album_id: str) -> tuple[str, bool]:
     if not src:
         raise ValueError(f"No src in response: {data}")
 
-    # src comes as protocol-relative (//storage...), add https
+    # src comes as protocol-relative (//...), add https
     if src.startswith("//"):
         src = "https:" + src
 
-    # Fetch file location JSON to build the signed URL
+    # Some responses give a direct MP3 URL; others need a second-step location fetch
+    if "/get-mp3/" in src and "storage.mds" not in src:
+        return src, is_preview
+
+    # Two-step: fetch file location JSON to build the signed URL
     loc_r = _session.get(src + "&format=json", timeout=15)
     loc_r.raise_for_status()
     fd = loc_r.json()
